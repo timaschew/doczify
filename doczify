@@ -1,0 +1,161 @@
+#!/usr/bin/env node
+
+const path = require('path')
+const os = require('os')
+const http = require('http')
+
+const fse = require('fs-extra')
+const merge = require('lodash.merge')
+const uniq = require('lodash.uniq')
+const yaml = require('js-yaml')
+const handler = require('serve-handler')
+
+const walker = require('./walker')
+const transformer = require('./transformer')
+
+const configFile = 'docsify.yml'
+
+const defaultConfig = {
+	//core: '//cdn.jsdelivr.net/npm/docsify@4',
+	// fork with code fragments support
+	core: '//raw.githubusercontent.com/timaschew/docsify/code-fragments-built/lib/docsify.min.js',
+	styles: [
+		'//cdn.jsdelivr.net/npm/docsify@4/lib/themes/vue.css'
+	],
+	docsify: {
+		plugins: [],
+		routerMode: 'hash',
+		homepage: 'README.md',
+		loadSidebar: '_sidebar.md',
+		autoHeader: true,
+		themeable: {
+			readyTransition : true, // default
+			responsiveTables: true  // default
+		}
+	}
+}
+async function main() {
+
+	if (await fse.exists(configFile) === false) {
+		console.error('no config file found', configFile)
+		process.exit(1)
+	}
+
+	const userConfig = yaml.safeLoad(await fse.readFile(configFile, 'utf8')) || {}
+	if (userConfig.docsify == null) {
+		userConfig.docsify = {}
+	}
+	const config = merge({}, defaultConfig, userConfig)
+
+	const inputDirectory = process.cwd()
+
+	const tmpDirectory = fse.mkdtempSync(os.tmpdir()+'/')
+	fse.mkdirpSync(tmpDirectory)
+	let autoPrismLanguages = []
+	let resourceCounter = {}
+	let transformerCounter = 0
+
+	for (let from in userConfig.copy) {
+		const inDir = path.join(inputDirectory, from)
+		const outDir = path.join(tmpDirectory, userConfig.copy[from])
+		await walker(inDir, async function(filePath, inputContent) {
+			await fse.mkdirp(path.dirname(outDir))
+			const outFilePath = path.join(outDir, filePath)
+			await fse.mkdirp(path.dirname(outFilePath))
+			if (inputContent != null) {
+				// TODO: transform md file
+				const result = transformer(inputContent, userConfig.variables)
+				autoPrismLanguages = autoPrismLanguages.concat(result.scripts)
+				await fse.writeFile(outFilePath, result.content, 'utf8')
+				for (let resource of result.resources) {
+					await fse.mkdirp(path.dirname(resource.out))
+					await fse.copy(path.join(inDir, resource.in), path.join(outDir, resource.out), {overwrite: true})
+					resourceCounter[resource.out] = true
+				}
+				transformerCounter += result.counter
+			} else {
+				await fse.mkdirp(path.dirname(outDir))
+				await fse.copy(path.join(inDir, filePath), outFilePath, {overwrite: true})
+			}
+
+		}).catch(error => {console.error})
+	}
+
+	autoPrismLanguages = uniq(autoPrismLanguages.sort())
+
+
+	const scriptPromises = userConfig.scripts.concat(autoPrismLanguages).map(async function(src) {
+		if (src.indexOf('//') === 0 ||
+			src.indexOf('http') === 0
+			) {
+			return `<script src="${src}"></script>`
+		} else {
+			const assetsDirectory =  path.join(tmpDirectory, '_assets')
+			await fse.mkdirpSync(assetsDirectory)
+			const scriptContent = await fse.readFile(path.join(inputDirectory, src), 'utf8')
+			await fse.writeFile(path.join(assetsDirectory, src), scriptContent, 'utf8')
+			return `<script src="${path.join('_assets', src)}"></script>`
+		}
+	})
+	const scripts = (await Promise.all(scriptPromises)).join('\n')
+
+	const stylePromises = userConfig.styles.map(async function(href) {
+		if (href.indexOf('//') === 0 ||
+			href.indexOf('http') === 0
+			) {
+			return `<link rel="stylesheet" href="${href}">`
+		} else {
+			const content = await fse.readFile(path.join(inputDirectory, href), 'utf8')
+			return `<style type="text/css">${content}</style>`
+		}
+		
+	})
+	const styles = (await Promise.all(stylePromises)).join('\n')
+
+	if (userConfig.core) {
+		await fse.copy(path.join(inputDirectory, userConfig.core), path.join(tmpDirectory, userConfig.core), {overwrite: true})
+	}
+
+	const outputDirectory = path.join(process.cwd(), 'docsify')
+
+	console.log(`transformed ${transformerCounter} occurences of plugin usages`)
+	console.log(`added ${autoPrismLanguages.length} prism languages automatically`)
+	console.log(`copied ${Object.keys(resourceCounter).length} files used in snippets`)
+
+	const servePath = path.join(outputDirectory)
+	const args = process.argv.slice(2)
+	if (args[0] == 'serve') {
+		const port = 5000
+		const server = http.createServer((request, response) => {
+		  return handler(request, response, {
+		  	public: servePath
+		  })
+		})
+		 
+		server.listen(port, () => {
+		  console.log(`serving ${servePath} on http://localhost:${port}`)
+		})
+	}
+	if (args[1] == 'static') {
+
+	}
+	const template = await fse.readFile(path.join(__dirname, 'index.html'), 'utf8')
+	const entryFile = createEntryFile(template, config, scripts, styles)
+	await fse.writeFile(path.join(tmpDirectory, 'index.html'), entryFile, 'utf8')
+
+	// finalize
+	await fse.move(tmpDirectory, outputDirectory, {overwrite: true})
+}
+main().catch(console.error)
+
+// migrate content
+const SNIPPET_INCLUDE_PATTERN = /```(.*)\s(\[.*\])\((.*)\)\s```/
+
+function createEntryFile(template, config, scripts, styles) {
+	return template
+		.replace('{{styles}}', styles)
+		.replace('{{init}}', `window.$docsify = ${JSON.stringify(config.docsify, null, 2)}`)
+		.replace('{{config.core}}', config.core)
+		.replace('{{scripts}}', scripts)
+	return template
+}

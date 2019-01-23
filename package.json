@@ -1,0 +1,20 @@
+{
+  "name": "doczify",
+  "version": "1.0.0",
+  "description": "entry file generator for docsify",
+  "bin": {
+    "doczify": "./doczify"
+  },
+  "main": "node doczify",
+  "author": "Anton Wilhelm",
+  "license": "ISC",
+  "dependencies": {
+    "fs-extra": "^7.0.1",
+    "js-yaml": "^3.12.1",
+    "lodash.merge": "^4.6.1",
+    "lodash.uniq": "^4.5.0",
+    "serve-handler": "^5.0.7",
+    "tmp": "0.0.33",
+    "walk": "^2.3.14"
+  }
+}
